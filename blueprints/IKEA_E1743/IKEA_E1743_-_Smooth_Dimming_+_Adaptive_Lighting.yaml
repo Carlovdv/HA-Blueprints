@@ -1,0 +1,214 @@
+
+blueprint:
+  name: IKEA E1743 - Smooth Dimming + Adaptive Lighting
+  description: >
+    IKEA TRADFRI E1743 Zigbee2MQTT schakelaar.
+    Ondersteunt aan/uit of toggle, vloeiend
+    dimmen en optioneel Adaptive Lighting.
+    Geen input_text helper nodig.
+  domain: automation
+
+  input:
+    controller:
+      name: Zigbee2MQTT schakelaarnaam
+      description: Friendly name van de IKEA E1743
+      selector:
+        text: {}
+
+    mqtt_base:
+      name: MQTT basistopic
+      default: zigbee2mqtt
+      selector:
+        text: {}
+
+    target_light:
+      name: Lamp of lampengroep
+      selector:
+        entity:
+          filter:
+            domain: light
+
+    target_z2m:
+      name: Zigbee2MQTT lamp/groepsnaam
+      description: >
+        Friendly name van de lamp of groep
+        zoals ingesteld in Zigbee2MQTT.
+      selector:
+        text: {}
+
+    press_mode:
+      name: Gedrag bij kort indrukken
+      default: on_off
+      selector:
+        select:
+          options:
+            - label: Boven aan, onder uit
+              value: on_off
+            - label: Beide knoppen toggle
+              value: toggle
+
+    dim_speed:
+      name: Dimsnelheid
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 150
+          step: 5
+          mode: slider
+
+    adaptive_profile:
+      name: Adaptive Lighting profiel
+      description: >
+        Optioneel. Selecteer de switch
+        van het Adaptive Lighting profiel.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+
+mode: queued
+max: 20
+max_exceeded: silent
+
+trigger_variables:
+  mqtt_base_name: !input mqtt_base
+  controller_name: !input controller
+
+triggers:
+  - trigger: mqtt
+    topic: "{{ mqtt_base_name }}/{{ controller_name }}"
+
+variables:
+  mqtt_base_topic: !input mqtt_base
+  target_light_entity: !input target_light
+  target_z2m_name: !input target_z2m
+  adaptive_switch: !input adaptive_profile
+  short_press_mode: !input press_mode
+  brightness_speed: !input dim_speed
+
+conditions:
+  - condition: template
+    value_template: >
+      {{ trigger.payload_json is defined
+         and trigger.payload_json.action | default('')
+         in [
+           'on',
+           'off',
+           'brightness_move_up',
+           'brightness_move_down',
+           'brightness_stop'
+         ] }}
+
+actions:
+  - variables:
+      action_name: "{{ trigger.payload_json.action }}"
+      light_topic: >
+        {{ mqtt_base_topic ~ '/' ~
+           target_z2m_name | trim ~ '/set' }}
+
+  - choose:
+      # KORTE DRUK: BOVEN
+      - conditions:
+          - condition: template
+            value_template: "{{ action_name == 'on' }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: >
+                  {{ short_press_mode == 'toggle' }}
+            then:
+              - action: light.toggle
+                target:
+                  entity_id: "{{ target_light_entity }}"
+            else:
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ target_light_entity }}"
+
+      # KORTE DRUK: ONDER
+      - conditions:
+          - condition: template
+            value_template: "{{ action_name == 'off' }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: >
+                  {{ short_press_mode == 'toggle' }}
+            then:
+              - action: light.toggle
+                target:
+                  entity_id: "{{ target_light_entity }}"
+            else:
+              - action: light.turn_off
+                target:
+                  entity_id: "{{ target_light_entity }}"
+
+      # LANG INDRUKKEN: HELDERDER
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ action_name == 'brightness_move_up' }}
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "{{ light_topic }}"
+              payload: >
+                {{ {'brightness_move':
+                    brightness_speed | int} | to_json }}
+              qos: 0
+              retain: false
+
+          - if:
+              - condition: template
+                value_template: >
+                  {{ adaptive_switch | trim != '' }}
+            then:
+              - action: adaptive_lighting.set_manual_control
+                data:
+                  entity_id: "{{ adaptive_switch }}"
+                  lights:
+                    - "{{ target_light_entity }}"
+                  manual_control: brightness
+
+      # LANG INDRUKKEN: DIMMEN
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ action_name == 'brightness_move_down' }}
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "{{ light_topic }}"
+              payload: >
+                {{ {'brightness_move':
+                    0 - (brightness_speed | int)}
+                    | to_json }}
+              qos: 0
+              retain: false
+
+          - if:
+              - condition: template
+                value_template: >
+                  {{ adaptive_switch | trim != '' }}
+            then:
+              - action: adaptive_lighting.set_manual_control
+                data:
+                  entity_id: "{{ adaptive_switch }}"
+                  lights:
+                    - "{{ target_light_entity }}"
+                  manual_control: brightness
+
+      # LOSLATEN: STOP DIMMEN
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ action_name == 'brightness_stop' }}
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "{{ light_topic }}"
+              payload: '{"brightness_move": "stop"}'
+              qos: 0
+              retain: false
